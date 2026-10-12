@@ -62,7 +62,8 @@
 | **Worker Crash Recovery / Lease Reclaim** | `go test -v -run TestWorkerLeaseReclaimAfterCrash ./cmd/worker` | **PASS** | 0 | Voucher with expired lease (`locked_until < now()`) is claimed by worker run and pushed cleanly. |
 | **Worker Retry Exhaustion to Failed** | `go test -v -run TestWorkerExhaustionToFailed ./cmd/worker` | **PASS** | 0 | Voucher at attempt 5 fails upstream -> attempt becomes 6, status transitions to `failed`, and `last_error` is preserved. |
 | **Two Simultaneous Workers** | `go test -v -run TestTwoWorkersConcurrentProcessing ./cmd/worker` | **PASS** | 0 | 2 worker drain loops executed simultaneously over 6 vouchers; all 6 pushed with zero duplicate claims. |
-| **Full Non-Cached Test Suite** | `go test -count=1 ./...` | **PASS** | 0 | All API and Worker tests passed against live PostgreSQL on Neon. |
+| **Worker Crash Mid-Flight Reconciliation** | `go test -v -run TestWorkerCrashMidFlightReconcilesDuplicate ./cmd/worker` | **PASS** | 0 | Deterministically simulates Worker 1 calling accounting, accounting persisting record, Worker 1 crashing before DB commit, lease expiring, Worker 2 retrying, accounting returning 409, and Worker 2 reconciling to pushed with 0 duplicates. |
+| **Full Non-Cached Test Suite** | `go test -p 1 -count=1 ./...` | **PASS** | 0 | All 7 API and Worker tests passed against live PostgreSQL on Neon (`sutra_test`). |
 | **Next.js Production Build** | `cd web && pnpm run build` | **PASS** | 0 | Turbopack production build succeeded; `/sync` static route generated cleanly with 0 TypeScript errors. |
 
 ---

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -243,3 +244,152 @@ func TestTwoWorkersConcurrentProcessing(t *testing.T) {
 		t.Fatalf("expected all 6 vouchers to be pushed, got pushed=%d, pending=%d", pushedCount, pendingCount)
 	}
 }
+
+// TestWorkerCrashMidFlightReconcilesDuplicate deterministically simulates the exact failure sequence:
+// 1. A pending voucher exists in the database.
+// 2. Worker 1 claims the voucher and successfully calls the remote accounting service.
+// 3. Remote accounting service records the voucher and issues external_ref "acct-crash-sequence-1".
+// 4. Worker 1 crashes BEFORE updating PostgreSQL (leaving the voucher pending with an active lease).
+// 5. The lease expires (locked_until passes).
+// 6. Worker 2 claims the voucher on retry and resends the same stable client_ref.
+// 7. Accounting service detects duplicate client_ref, creates no duplicate, and returns HTTP 409 with original external_ref.
+// 8. Worker 2 reconciles the 409 and marks the voucher pushed.
+// 9. PostgreSQL verifies status='pushed' with the original external_ref and attempts=2.
+// 10. Accounting service verifies only 1 accounting entry was ever created.
+func TestWorkerCrashMidFlightReconcilesDuplicate(t *testing.T) {
+	db := setupTestDB(t)
+
+	type acctStore struct {
+		sync.Mutex
+		entries   map[string]string
+		callCount int
+	}
+	store := &acctStore{entries: make(map[string]string)}
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			ClientRef   string `json:"client_ref"`
+			AmountPaise int64  `json:"amount_paise"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+
+		store.Lock()
+		defer store.Unlock()
+		store.callCount++
+
+		if existing, exists := store.entries[in.ClientRef]; exists {
+			// Remote idempotency: duplicate client_ref returns 409 with original external_ref
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]string{"external_ref": existing})
+			return
+		}
+
+		ref := "acct-crash-sequence-1"
+		store.entries[in.ClientRef] = ref
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{"external_ref": ref})
+	}))
+	defer mockServer.Close()
+
+	ctx := context.Background()
+	clientRef := "receipt:crash-recovery-sim-001"
+	var voucherID string
+	err := db.QueryRow(ctx, `
+		INSERT INTO vouchers(type, source_id, amount_paise, status, client_ref)
+		VALUES('jobwork_receipt', gen_random_uuid(), 0, 'pending', $1)
+		RETURNING id`, clientRef).Scan(&voucherID)
+	if err != nil {
+		t.Fatalf("insert voucher: %v", err)
+	}
+
+	// Step 2 & 3: Worker 1 claims voucher and calls accounting
+	var v voucher
+	err = db.QueryRow(ctx, `
+		WITH claimed AS (
+			SELECT id FROM vouchers WHERE id=$1::uuid FOR UPDATE
+		)
+		UPDATE vouchers v
+		SET attempts = v.attempts + 1,
+		    locked_until = now() + interval '15 seconds',
+		    updated_at = now()
+		FROM claimed WHERE v.id = claimed.id
+		RETURNING v.id, v.client_ref, v.amount_paise, v.attempts`, voucherID).Scan(&v.ID, &v.ClientRef, &v.Amount, &v.Attempts)
+	if err != nil {
+		t.Fatalf("worker 1 claim: %v", err)
+	}
+
+	// Worker 1 makes HTTP call to accounting service
+	reqBody, _ := json.Marshal(map[string]any{"client_ref": v.ClientRef, "amount_paise": v.Amount})
+	resp, err := http.Post(mockServer.URL+"/api/vouchers", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("worker 1 http post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("worker 1 expected 201 Created from accounting, got %d", resp.StatusCode)
+	}
+
+	// Step 4: Worker 1 CRASHES before updating PostgreSQL!
+	// At this point, accounting has the record ("acct-crash-sequence-1"), but PostgreSQL still has:
+	// status='pending', attempts=1, locked_until in the future.
+	var statusBeforeCrash string
+	var attemptsBeforeCrash int
+	_ = db.QueryRow(ctx, `SELECT status, attempts FROM vouchers WHERE id=$1::uuid`, voucherID).Scan(&statusBeforeCrash, &attemptsBeforeCrash)
+	if statusBeforeCrash != "pending" || attemptsBeforeCrash != 1 {
+		t.Fatalf("expected pending attempt 1 before recovery, got %s attempt %d", statusBeforeCrash, attemptsBeforeCrash)
+	}
+
+	// Step 5: Lease expires (simulating passage of 15 seconds)
+	_, err = db.Exec(ctx, `UPDATE vouchers SET locked_until = now() - interval '1 second' WHERE id=$1::uuid`, voucherID)
+	if err != nil {
+		t.Fatalf("expire lease: %v", err)
+	}
+
+	// Step 6: Worker 2 runs drain() to process the queue
+	// Worker 2 should reclaim the voucher, resend the same client_ref, receive 409 from accounting,
+	// and reconcile it into 'pushed'
+	if err := drain(ctx, db, mockServer.URL); err != nil {
+		t.Fatalf("worker 2 drain: %v", err)
+	}
+
+	// Step 7 & 8: Wait for Worker 2 to complete reconciliation
+	var finalStatus, finalExtRef string
+	var finalAttempts int
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		err = db.QueryRow(ctx, `SELECT status, COALESCE(external_ref, ''), attempts FROM vouchers WHERE id=$1::uuid`, voucherID).Scan(&finalStatus, &finalExtRef, &finalAttempts)
+		if err == nil && finalStatus == "pushed" {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if finalStatus != "pushed" {
+		t.Fatalf("expected voucher to be reconciled to 'pushed', got '%s'", finalStatus)
+	}
+	if finalExtRef != "acct-crash-sequence-1" {
+		t.Fatalf("expected external_ref 'acct-crash-sequence-1', got '%s'", finalExtRef)
+	}
+	if finalAttempts != 2 {
+		t.Fatalf("expected attempts 2 after retry, got %d", finalAttempts)
+	}
+
+	// Step 9: Verify remote accounting service state:
+	store.Lock()
+	defer store.Unlock()
+	if store.callCount != 2 {
+		t.Fatalf("expected exactly 2 HTTP calls (original + retry), got %d", store.callCount)
+	}
+	if len(store.entries) != 1 {
+		t.Fatalf("expected exactly 1 accounting entry, got %d", len(store.entries))
+	}
+	if store.entries[clientRef] != "acct-crash-sequence-1" {
+		t.Fatalf("unexpected entry in accounting: %v", store.entries)
+	}
+}
+

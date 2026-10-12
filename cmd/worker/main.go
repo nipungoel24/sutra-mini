@@ -138,7 +138,9 @@ func push(ctx context.Context, db *pgxpool.Pool, accountingURL string, v voucher
 		}
 		if err := json.NewDecoder(res.Body).Decode(&resp); err == nil && resp.ExternalRef != "" {
 			log.Printf("[worker] Success pushing %s -> external_ref: %s", v.ClientRef, resp.ExternalRef)
-			_, _ = db.Exec(ctx, `UPDATE vouchers SET status='pushed', external_ref=$2, last_error=NULL, locked_until=NULL, updated_at=now() WHERE id=$1::uuid`, v.ID, resp.ExternalRef)
+			if _, err := db.Exec(ctx, `UPDATE vouchers SET status='pushed', external_ref=$2, last_error=NULL, locked_until=NULL, updated_at=now() WHERE id=$1::uuid`, v.ID, resp.ExternalRef); err != nil {
+				log.Printf("[worker] Failed to update voucher %s to pushed: %v", v.ID, err)
+			}
 			return
 		}
 		handleFailure(ctx, db, v, "invalid success response payload from accounting")
@@ -153,7 +155,9 @@ func push(ctx context.Context, db *pgxpool.Pool, accountingURL string, v voucher
 		}
 		if err := json.NewDecoder(res.Body).Decode(&resp); err == nil && resp.ExternalRef != "" {
 			log.Printf("[worker] Reconciled duplicate 409 for %s -> original external_ref: %s", v.ClientRef, resp.ExternalRef)
-			_, _ = db.Exec(ctx, `UPDATE vouchers SET status='pushed', external_ref=$2, last_error=NULL, locked_until=NULL, updated_at=now() WHERE id=$1::uuid`, v.ID, resp.ExternalRef)
+			if _, err := db.Exec(ctx, `UPDATE vouchers SET status='pushed', external_ref=$2, last_error=NULL, locked_until=NULL, updated_at=now() WHERE id=$1::uuid`, v.ID, resp.ExternalRef); err != nil {
+				log.Printf("[worker] Failed to reconcile voucher %s to pushed: %v", v.ID, err)
+			}
 			return
 		}
 		handleFailure(ctx, db, v, "accounting returned 409 without valid external_ref")
@@ -175,7 +179,9 @@ func push(ctx context.Context, db *pgxpool.Pool, accountingURL string, v voucher
 func handleFailure(ctx context.Context, db *pgxpool.Pool, v voucher, errText string) {
 	if v.Attempts >= 6 {
 		log.Printf("[worker] Voucher %s exhausted %d attempts -> marking failed: %s", v.ClientRef, v.Attempts, errText)
-		_, _ = db.Exec(ctx, `UPDATE vouchers SET status='failed', last_error=$2, locked_until=NULL, updated_at=now() WHERE id=$1::uuid`, v.ID, errText)
+		if _, err := db.Exec(ctx, `UPDATE vouchers SET status='failed', last_error=$2, locked_until=NULL, updated_at=now() WHERE id=$1::uuid`, v.ID, errText); err != nil {
+			log.Printf("[worker] Failed to mark voucher %s failed: %v", v.ID, err)
+		}
 		return
 	}
 
@@ -184,7 +190,9 @@ func handleFailure(ctx context.Context, db *pgxpool.Pool, v voucher, errText str
 	intervalStr := fmt.Sprintf("%d seconds", delaySeconds)
 
 	log.Printf("[worker] Retrying %s in %s (attempt %d/6): %s", v.ClientRef, intervalStr, v.Attempts, errText)
-	_, _ = db.Exec(ctx, `UPDATE vouchers SET next_attempt_at=now() + $2::interval, last_error=$3, locked_until=NULL, updated_at=now() WHERE id=$1::uuid`, v.ID, intervalStr, errText)
+	if _, err := db.Exec(ctx, `UPDATE vouchers SET next_attempt_at=now() + $2::interval, last_error=$3, locked_until=NULL, updated_at=now() WHERE id=$1::uuid`, v.ID, intervalStr, errText); err != nil {
+		log.Printf("[worker] Failed to schedule retry for voucher %s: %v", v.ID, err)
+	}
 }
 
 func min(a, b int) int {

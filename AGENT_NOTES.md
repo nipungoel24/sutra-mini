@@ -73,6 +73,11 @@ When we audited the repository initialized by Codex:
 - **Root Cause:** A previous `pnpm` run had left an incomplete virtual store in `web/node_modules/.pnpm/`, but the top-level `.bin/next` symlinks were never generated. Running `npm install` subsequently failed with null reference errors inside npm's arborist due to pnpm symlinks.
 - **Fix:** We ran `pnpm add next@16.4.0 react@19.3.0 react-dom@19.3.0 typescript@5.7.2` directly using `pnpm`, properly populating the lockfile (`pnpm-lock.yaml`) and generating the Turbopack production build cleanly.
 
+### Failure 4: Test Database Truncation Contention Across Parallel Go Packages
+- **Symptoms:** Running `go test ./...` intermittently failed when `cmd/api` and `cmd/worker` ran simultaneously against `TEST_DATABASE_URL`.
+- **Root Cause:** Go's test runner runs tests across separate packages concurrently (`-p GOMAXPROCS`). When `cmd/api` tests inserted test rows, `cmd/worker` tests executed `TRUNCATE vouchers CASCADE`, causing cross-package race conditions on the shared integration test database.
+- **Fix:** Documented and verified running integration tests with `go test -p 1 -count=1 ./...` ensuring clean sequential execution across packages against the single isolated test database. Added `TestWorkerCrashMidFlightReconcilesDuplicate` to deterministically verify the complete 8-step mid-flight worker crash and 409 duplicate reconciliation sequence.
+
 ---
 
 ## 5. What Remains Unverified or External

@@ -202,8 +202,8 @@ Run the complete test suite:
 # Set TEST_DATABASE_URL
 $env:TEST_DATABASE_URL = (Get-Content .env | Where-Object { $_ -match '^TEST_DATABASE_URL=(.*)' } | ForEach-Object { $matches[1] })
 
-# Run all integration tests
-go test -v ./...
+# Run all integration tests (sequentially across packages to avoid test db lock contention)
+go test -v -p 1 ./...
 ```
 
 ### What the tests prove:
@@ -213,6 +213,7 @@ go test -v ./...
 4. `TestWorkerLeaseReclaimAfterCrash`: Simulates a worker crash leaving an expired lease (`locked_until < now()`). Proves a restarted worker safely reclaims and completes the push.
 5. `TestWorkerExhaustionToFailed`: Proves that a voucher repeatedly failing remote calls is transitioned to `status='failed'` with `last_error` preserved after 6 attempts.
 6. `TestTwoWorkersConcurrentProcessing`: Proves that two worker instances running simultaneously drain the queue without claiming the same voucher or interfering.
+7. `TestWorkerCrashMidFlightReconcilesDuplicate`: Deterministically simulates Worker 1 dying after the remote accounting service creates a record, lease expiring, Worker 2 retrying with identical `client_ref`, receiving 409 Conflict, and reconciling the voucher to `pushed` with zero duplicate entries.
 
 ---
 

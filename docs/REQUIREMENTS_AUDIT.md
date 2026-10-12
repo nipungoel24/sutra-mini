@@ -57,7 +57,7 @@
 | **Safe Concurrent Worker Instances (2 instances)** | `cmd/worker/main.go` | Concurrency integration test | **PASS** | `FOR UPDATE SKIP LOCKED` guarantees no two workers claim same voucher | None |
 | **Explicit Outbound HTTP Timeouts** | `cmd/worker/main.go` (`push`) | Timeout test | **PASS** | `context.WithTimeout(ctx, 2*time.Second)` | None |
 | **Slow Voucher Does Not Block Others** | `cmd/worker/main.go` (`drain`) | Async dispatch test | **PASS** | `go push(...)` in goroutine, worker loop continues | None |
-| **Crash Recovery During HTTP Call** | `cmd/worker/main.go` | Crash simulation test | **PASS** | `locked_until` expires after 15s; on retry, same `client_ref` sent | None |
+| **Crash Recovery During HTTP Call** | `cmd/worker/main.go` | `TestWorkerCrashMidFlightReconcilesDuplicate` | **PASS** | Simulates Worker 1 death post-accounting call, lease expiration, Worker 2 retry with identical client_ref, 409 duplicate reconciliation, and zero duplicate accounting entries | None |
 | **Reconcile Duplicate (409) via `client_ref`** | `cmd/worker/main.go` (`push`) | `TestWorkerDuplicateReconciliation` | **PASS** | Validates `resp.ExternalRef != ""` on HTTP 409 before marking `status='pushed'` | None |
 
 ---

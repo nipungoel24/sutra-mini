@@ -1,4 +1,4 @@
-module github.com/your-github-user/sutra-mini
+module github.com/nipungoel24/sutra-mini
 
 go 1.23
 
