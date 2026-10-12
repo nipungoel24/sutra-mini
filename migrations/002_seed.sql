@@ -1,0 +1,6 @@
+INSERT INTO skus(code,name,image_url) VALUES ('SR-101','Embroidered Kurta','https://images.unsplash.com/photo-1610030469983-98e550d6193c'),('SR-102','Chanderi Dupatta','https://images.unsplash.com/photo-1583391733956-6c78276477e2'),('SR-103','Handblock Saree','https://images.unsplash.com/photo-1610189020382-668a8fff6e6f'),('SR-104','Festive Anarkali','https://images.unsplash.com/photo-1583391733981-8498407181e7'),('SR-105','Silk Co-ord Set','https://images.unsplash.com/photo-1597983073493-88cd35cf93b0');
+INSERT INTO parties(name,phone) VALUES ('Meera Embroidery Works','+91 98100 00001'),('Kavya Stitching Unit','+91 98100 00002');
+INSERT INTO jobwork_issues(party_id,sku_id,qty,issued_on) SELECT p.id,s.id,100,'2026-10-01' FROM parties p,skus s WHERE p.name='Meera Embroidery Works' AND s.code='SR-101';
+INSERT INTO jobwork_issues(party_id,sku_id,qty,issued_on) SELECT p.id,s.id,80,'2026-10-02' FROM parties p,skus s WHERE p.name='Kavya Stitching Unit' AND s.code='SR-102';
+INSERT INTO jobwork_issues(party_id,sku_id,qty,issued_on) SELECT p.id,s.id,60,'2026-10-03' FROM parties p,skus s WHERE p.name='Meera Embroidery Works' AND s.code='SR-103';
+INSERT INTO jobwork_issues(party_id,sku_id,qty,issued_on) SELECT p.id,s.id,40,'2026-10-04' FROM parties p,skus s WHERE p.name='Kavya Stitching Unit' AND s.code='SR-104';
