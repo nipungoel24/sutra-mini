@@ -10,6 +10,7 @@
 
 - **Codex:** Used initially to generate the starter scaffold, migrations, initial handlers, and preliminary Next.js page.
 - **Antigravity (Google DeepMind):** Used as the principal software engineer to audit the existing repository, provision tools, diagnose failures, implement reliability guarantees, expand integration test coverage, and verify end-to-end execution.
+- **Claude Code (Anthropic):** Used on 2026-10-14 as an independent reviewer: re-ran the build and the tests, mutation-tested the required tests, ran the evaluation scenarios live, and made narrowly scoped fixes (see section 5).
 - **Toolchain:** Official Go 1.23.6 runtime (Windows amd64), Node.js v22.20.0, pnpm 11.22.0, PostgreSQL 18 client tools (`psql`), and Neon serverless PostgreSQL.
 
 ---
@@ -80,7 +81,19 @@ When we audited the repository initialized by Codex:
 
 ---
 
-## 5. What Remains Unverified or External
+## 5. Independent Review with Claude Code (2026-10-14)
+
+Before submitting, I ran an independent review with Claude Code (Anthropic) acting as a reviewer rather than the implementer. It re-ran everything instead of trusting the earlier reports, mutation-tested the required tests, and ran the evaluator's scenarios live against the real binaries. Full report: `docs/CLAUDE_CODE_AUDIT.md`.
+
+What it found that the earlier agents had missed:
+1. **Stale-worker writes were not fenced.** The worker's final `UPDATE`s matched on `id` only. A worker that outlived its lease could flip a voucher another worker had already marked `pushed` to `failed`. Fixed: result writes now require `status='pending' AND attempts=<this claim>`. New test `TestStaleWorkerResultIsDiscarded` fails without the fix.
+2. **The two-worker test could not detect a double claim.** Both deliveries would still leave the voucher `pushed`. The test now counts deliveries per `client_ref`.
+3. **Malformed UUIDs returned 500 and leaked SQL errors** (`invalid input syntax for type uuid ... SQLSTATE 22P02`) to API callers. Fixed with validation (400/404) and generic error messages.
+4. **The worker swallowed claim errors** (`return nil` on any DB error). Fixed.
+5. **README/demo reproducibility:** the docs hard-coded an issue UUID that only exists on our Neon database, never explained how to produce a `failed` voucher (six consecutive simulated 500s is about 0.006%), and the demo script quoted 4/6 results for a test that actually produces 5/5. Fixed.
+6. Smaller: the empty voucher list returned `null`, `CORS_ORIGIN` was ignored, receipt JSON used PascalCase keys, there was no request-size limit, and the tests had no guard against pointing `TEST_DATABASE_URL` at the runtime database.
+
+## 6. What Remains Unverified or External
 
 - **Public GitHub Remote Push:** The repository has been audited, Git history is clean, and `.env` is uncommitted. Pushing to a public remote requires user authorization and account authentication.
 - **Screen Recording:** A demonstration script has been prepared in `docs/DEMO_SCRIPT.md`. The video file itself requires manual screen recording software.
@@ -88,7 +101,7 @@ When we audited the repository initialized by Codex:
 
 ---
 
-## 6. Honest Statement of Limitations
+## 7. Honest Statement of Limitations
 
 - The `/ask` LLM stretch endpoint was omitted in accordance with the brief instructions ("Stretch, only if you finished early"). Correctness and testing of core transactional guarantees were prioritized.
 - Network latency to serverless Neon (us-east-2) adds ~150ms per round-trip from Windows local testing in India; while local transactions run in single-digit milliseconds, multi-request sequential batches over WAN take several seconds. All pool configurations and timeouts account for this.

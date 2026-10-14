@@ -111,3 +111,19 @@
 - [x] Demo script ready (`docs/DEMO_SCRIPT.md`)
 - [ ] Public GitHub repository (Awaiting user authorization to push)
 - [ ] 3-minute screen recording (Script prepared in `docs/DEMO_SCRIPT.md`)
+
+---
+
+## 7. Independent Re-verification (2026-10-14, Claude Code)
+
+Full detail and evidence: `docs/CLAUDE_CODE_AUDIT.md`.
+
+| Check | Command | Result |
+| :--- | :--- | :--- |
+| Build / vet / gofmt | `go build ./...`, `go vet ./...`, `gofmt -l cmd` | **PASS** (exit 0, no files listed) |
+| Integration suite (9 tests) | `go test -v -p 1 -count=1 ./...` against Neon `sutra_test` | **PASS** (exit 0) |
+| Mutation checks | lock / idempotency lookup / lease condition / result-write fence removed in a scratch copy | Corresponding tests **FAIL** as required |
+| Frontend build | `cd web && pnpm run build` | **PASS** (exit 0) |
+| Live E2E (real binaries, `sutra_test` seeded) | replay, 10 concurrent receipts, kill worker during 5 s hang + restart, two workers, failed → UI Retry | **PASS** (see audit §D) |
+
+Corrections to earlier sections of this file: the suite now has 9 tests, not 7. Section 4's claim that the two-worker test proved "zero duplicate claims" was not true of the original test (it could not detect a double delivery); the test now asserts one delivery per `client_ref`.

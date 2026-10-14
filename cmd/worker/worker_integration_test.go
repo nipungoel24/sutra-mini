@@ -21,6 +21,10 @@ func setupTestDB(t *testing.T) *pgxpool.Pool {
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL is required for database integration tests")
 	}
+	// Setup truncates vouchers, so never let it point at the runtime database.
+	if dsn == os.Getenv("DATABASE_URL") {
+		t.Fatal("TEST_DATABASE_URL must not equal DATABASE_URL: integration tests truncate tables")
+	}
 
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
@@ -196,11 +200,22 @@ func TestWorkerExhaustionToFailed(t *testing.T) {
 func TestTwoWorkersConcurrentProcessing(t *testing.T) {
 	db := setupTestDB(t)
 
+	// Count deliveries per client_ref so a double claim is detected even though
+	// both deliveries would still leave the voucher "pushed".
+	var mu sync.Mutex
+	calls := map[string]int{}
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			ClientRef string `json:"client_ref"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		mu.Lock()
+		calls[in.ClientRef]++
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"external_ref": "acct-" + r.URL.Query().Get("x"),
+			"external_ref": "acct-" + in.ClientRef,
 		})
 	}))
 	defer mockServer.Close()
@@ -242,6 +257,71 @@ func TestTwoWorkersConcurrentProcessing(t *testing.T) {
 
 	if pushedCount != 6 {
 		t.Fatalf("expected all 6 vouchers to be pushed, got pushed=%d, pending=%d", pushedCount, pendingCount)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 6 {
+		t.Fatalf("expected deliveries for 6 distinct client_refs, got %d: %v", len(calls), calls)
+	}
+	for ref, n := range calls {
+		if n != 1 {
+			t.Fatalf("client_ref %s was delivered %d times; two workers claimed the same voucher", ref, n)
+		}
+	}
+	var maxAttempts int
+	if err := db.QueryRow(ctx, `SELECT max(attempts) FROM vouchers`).Scan(&maxAttempts); err != nil {
+		t.Fatal(err)
+	}
+	if maxAttempts != 1 {
+		t.Fatalf("expected every voucher claimed exactly once, max attempts=%d", maxAttempts)
+	}
+}
+
+// TestStaleWorkerResultIsDiscarded verifies the fencing on result writes: a worker whose
+// lease expired (and whose voucher was reclaimed, bumping attempts) cannot overwrite the
+// newer state when its late result finally arrives.
+func TestStaleWorkerResultIsDiscarded(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	var pushedID string
+	// Worker B reclaimed at attempt 7 and already settled the voucher as pushed.
+	err := db.QueryRow(ctx, `
+		INSERT INTO vouchers(type, source_id, amount_paise, status, attempts, client_ref, external_ref)
+		VALUES('jobwork_receipt', gen_random_uuid(), 0, 'pushed', 7, 'receipt:test-stale-pushed', 'acct-from-b')
+		RETURNING id`).Scan(&pushedID)
+	if err != nil {
+		t.Fatalf("insert pushed voucher: %v", err)
+	}
+	// Stale worker A still holds its attempt-6 claim and now reports exhaustion.
+	handleFailure(ctx, db, voucher{ID: pushedID, ClientRef: "receipt:test-stale-pushed", Attempts: 6}, "stale timeout")
+
+	var status, extRef, lastErr string
+	if err := db.QueryRow(ctx, `SELECT status, COALESCE(external_ref,''), COALESCE(last_error,'') FROM vouchers WHERE id=$1::uuid`, pushedID).Scan(&status, &extRef, &lastErr); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pushed" || extRef != "acct-from-b" || lastErr != "" {
+		t.Fatalf("stale failure overwrote settled voucher: status=%s external_ref=%s last_error=%q", status, extRef, lastErr)
+	}
+
+	var pendingID string
+	// Worker B reclaimed at attempt 3 and is still in flight.
+	err = db.QueryRow(ctx, `
+		INSERT INTO vouchers(type, source_id, amount_paise, status, attempts, locked_until, client_ref)
+		VALUES('jobwork_receipt', gen_random_uuid(), 0, 'pending', 3, now() + interval '15 seconds', 'receipt:test-stale-pending')
+		RETURNING id`).Scan(&pendingID)
+	if err != nil {
+		t.Fatalf("insert pending voucher: %v", err)
+	}
+	// Stale worker A (attempt 2) schedules a retry; it must not clear B's lease.
+	handleFailure(ctx, db, voucher{ID: pendingID, ClientRef: "receipt:test-stale-pending", Attempts: 2}, "stale 500")
+
+	var leased bool
+	if err := db.QueryRow(ctx, `SELECT locked_until > now(), COALESCE(last_error,'') FROM vouchers WHERE id=$1::uuid`, pendingID).Scan(&leased, &lastErr); err != nil {
+		t.Fatal(err)
+	}
+	if !leased || lastErr != "" {
+		t.Fatalf("stale retry write touched reclaimed voucher: leased=%v last_error=%q", leased, lastErr)
 	}
 }
 
@@ -392,4 +472,3 @@ func TestWorkerCrashMidFlightReconcilesDuplicate(t *testing.T) {
 		t.Fatalf("unexpected entry in accounting: %v", store.entries)
 	}
 }
-

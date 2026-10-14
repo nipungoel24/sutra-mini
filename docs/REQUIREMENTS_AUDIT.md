@@ -5,6 +5,8 @@
 **Audit Date:** 2026-10-12  
 **Authoritative Source:** `case_study_brief.pdf` (Round 2 Case Study)
 
+> **Corrected 2026-10-14 by independent review** (see `docs/CLAUDE_CODE_AUDIT.md`): several rows previously cited automated tests that do not exist. The Test / Verification column now says *manual* where the evidence is a live run rather than an automated test.
+
 ---
 
 ## 1. Database & Schema Requirements
@@ -28,9 +30,9 @@
 | Requirement | Source File / Endpoint | Test / Verification | Status | Evidence | Missing / Needed Work |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **POST /jobwork/receipts**<br>- Validate `Idempotency-Key` header<br>- Validate `issue_id, qty > 0, received_on`<br>- Serialize receipt writers via issue row lock (`FOR UPDATE`)<br>- Replay same key returns original result & creates nothing twice<br>- Atomic receipt + voucher creation in single tx<br>- Prevent receipt overshoot | `cmd/api/main.go` (`createReceipt`) | `TestConcurrentReceiptsCannotOvershoot`, `TestIdempotencyReplayCreatesNothingTwice` | **PASS** | Row lock with `SELECT qty FROM jobwork_issues WHERE id=$1::uuid FOR UPDATE`, atomic transaction, unique idempotency key | None |
-| **GET /issues/{id}**<br>Returns `{id, issued, received, outstanding}` | `cmd/api/main.go` (`getIssue`) | Integration test & HTTP endpoint curl | **PASS** | `LEFT JOIN jobwork_receipts` grouped by `issue.id` | None |
-| **GET /vouchers?status=**<br>Filters vouchers by status | `cmd/api/main.go` (`listVouchers`) | Integration test & Frontend sync query | **PASS** | Filtered SQL query returning attempts, errors, refs | None |
-| **POST /vouchers/{id}/retry**<br>Requeues failed voucher | `cmd/api/main.go` (`retryVoucher`) | Integration test & UI retry click | **PASS** | `UPDATE vouchers SET status='pending', next_attempt_at=now(), locked_until=NULL WHERE id=$1 AND status='failed'` | None |
+| **GET /issues/{id}**<br>Returns `{id, issued, received, outstanding}` | `cmd/api/main.go` (`getIssue`) | Manual curl (live run 2026-10-14); no automated test | **PASS** | `LEFT JOIN jobwork_receipts` grouped by `issue.id` | None |
+| **GET /vouchers?status=**<br>Filters vouchers by status | `cmd/api/main.go` (`listVouchers`) | Manual curl + `/sync` dashboard; no automated test | **PASS** | Filtered SQL query returning attempts, errors, refs | None |
+| **POST /vouchers/{id}/retry**<br>Requeues failed voucher | `cmd/api/main.go` (`retryVoucher`) | Manual UI Retry click (live run 2026-10-14); no automated test | **PASS** | `UPDATE vouchers SET status='pending', next_attempt_at=now(), locked_until=NULL WHERE id=$1 AND status='failed'` | None |
 
 ---
 
@@ -38,10 +40,10 @@
 
 | Requirement | Source File / Endpoint | Test / Verification | Status | Evidence | Missing / Needed Work |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **POST /api/vouchers** | `cmd/mock-accounting/main.go` | Unit & Integration tests | **PASS** | In-memory store with `sync.Mutex` | None |
-| **20% simulated HTTP 500 responses** | `cmd/mock-accounting/main.go` | Mock test suite | **PASS** | `n < 20` returns HTTP 500 with JSON error message | None |
-| **10% simulated 5-second delay followed by 201** | `cmd/mock-accounting/main.go` | Mock test suite & worker timeout test | **PASS** | `n < 30` sleeps 5 seconds then returns 201 Created | None |
-| **Duplicate `client_ref` returns HTTP 409 with original `external_ref`** | `cmd/mock-accounting/main.go` | Duplicate reconciliation test | **PASS** | Checks `s.refs[x.ClientRef]` and returns HTTP 409 with `{external_ref}` | None |
+| **POST /api/vouchers** | `cmd/mock-accounting/main.go` | Manual live run; no automated test of this binary | **PASS** | In-memory store with `sync.Mutex` | None |
+| **20% simulated HTTP 500 responses** | `cmd/mock-accounting/main.go` | Code inspection + live run (`Simulated 500` log lines) | **PASS** | `n < 20` returns HTTP 500 with JSON error message | None |
+| **10% simulated 5-second delay followed by 201** | `cmd/mock-accounting/main.go` | Code inspection + live run with `MOCK_MODE=deterministic-delay` | **PASS** | `n < 30` records the entry, sleeps 5 seconds, then returns 201 Created | None |
+| **Duplicate `client_ref` returns HTTP 409 with original `external_ref`** | `cmd/mock-accounting/main.go` | Live run (kill worker mid-hang, restart, mock logs 409). Worker tests use an in-test mock with the same rule. | **PASS** | Checks `s.refs[x.ClientRef]` and returns HTTP 409 with `{external_ref}` | None |
 
 ---
 
@@ -50,13 +52,13 @@
 | Requirement | Source File | Test / Verification | Status | Evidence | Missing / Needed Work |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Atomic Claiming with Leases** | `cmd/worker/main.go` (`drain`) | Worker concurrency test | **PASS** | `WITH claimed AS (SELECT id FROM vouchers WHERE status='pending' AND next_attempt_at<=now() AND (locked_until IS NULL OR locked_until<now()) ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE ... locked_until=now()+interval '15 seconds'` | None |
-| **Retries & Exponential Backoff** | `cmd/worker/main.go` (`push`) | Retry state transition test | **PASS** | `delay := time.Duration(1 << min(v.Attempts, 6)) * time.Second` | None |
-| **Mark Persistent Failures Failed** | `cmd/worker/main.go` (`push`) | Exhaustion test | **PASS** | When `v.Attempts >= 6`, set `status='failed'` and store `last_error` | None |
+| **Retries & Exponential Backoff** | `cmd/worker/main.go` (`handleFailure`) | Live run log: 2, 4, 8, 16, 32 s; no automated test of the intermediate delays | **PASS** | `delaySeconds := 1 << min(v.Attempts, 6)` | None |
+| **Mark Persistent Failures Failed** | `cmd/worker/main.go` (`handleFailure`) | `TestWorkerExhaustionToFailed` | **PASS** | When `v.Attempts >= 6`, set `status='failed'` and store `last_error` | None |
 | **Record Failure Reason** | `cmd/worker/main.go` (`push`) | UI sync card display | **PASS** | `last_error` stores error text or HTTP status | None |
-| **Manual Retry Support** | `cmd/api/main.go` (`retryVoucher`) | End-to-end retry test | **PASS** | Clears `locked_until`, resets `next_attempt_at=now()`, resets `status='pending'` | None |
-| **Safe Concurrent Worker Instances (2 instances)** | `cmd/worker/main.go` | Concurrency integration test | **PASS** | `FOR UPDATE SKIP LOCKED` guarantees no two workers claim same voucher | None |
-| **Explicit Outbound HTTP Timeouts** | `cmd/worker/main.go` (`push`) | Timeout test | **PASS** | `context.WithTimeout(ctx, 2*time.Second)` | None |
-| **Slow Voucher Does Not Block Others** | `cmd/worker/main.go` (`drain`) | Async dispatch test | **PASS** | `go push(...)` in goroutine, worker loop continues | None |
+| **Manual Retry Support** | `cmd/api/main.go` (`retryVoucher`) | Manual UI Retry (live run 2026-10-14) | **PASS** | Clears `locked_until`, resets `next_attempt_at=now()`, resets `status='pending'` | None |
+| **Safe Concurrent Worker Instances (2 instances)** | `cmd/worker/main.go` | `TestTwoWorkersConcurrentProcessing` (asserts one delivery per `client_ref`) + live two-process run | **PASS** | `FOR UPDATE SKIP LOCKED` plus the `locked_until` lease; result writes fenced on `attempts` (`TestStaleWorkerResultIsDiscarded`) | None |
+| **Explicit Outbound HTTP Timeouts** | `cmd/worker/main.go` (`push`) | Live run: `context deadline exceeded` after 2 s against a 5 s hang | **PASS** | `context.WithTimeout(ctx, 2*time.Second)` and `http.Client{Timeout: 2.5s}` | None |
+| **Slow Voucher Does Not Block Others** | `cmd/worker/main.go` (`drain`) | Live run with `MOCK_MODE=deterministic-delay`; no automated test | **PASS** | `go push(...)` in goroutine, worker loop continues | None |
 | **Crash Recovery During HTTP Call** | `cmd/worker/main.go` | `TestWorkerCrashMidFlightReconcilesDuplicate` | **PASS** | Simulates Worker 1 death post-accounting call, lease expiration, Worker 2 retry with identical client_ref, 409 duplicate reconciliation, and zero duplicate accounting entries | None |
 | **Reconcile Duplicate (409) via `client_ref`** | `cmd/worker/main.go` (`push`) | `TestWorkerDuplicateReconciliation` | **PASS** | Validates `resp.ExternalRef != ""` on HTTP 409 before marking `status='pushed'` | None |
 
@@ -70,7 +72,7 @@
 | **No Concurrent Overshoot** | Issue locked with `FOR UPDATE`; `SUM(qty)` checked | `cmd/api/receipt_integration_test.go` | **PASS** | `TestConcurrentReceiptsCannotOvershoot` validates concurrent requests cannot exceed issue qty |
 | **Idempotency Replay Safety** | Check before and after lock; unique constraint on `idempotency_key` | `cmd/api/receipt_integration_test.go` | **PASS** | `TestIdempotencyReplayCreatesNothingTwice` confirms replay returns original receipt without duplicate |
 | **Integer Paise (No Floats)** | `amount_paise bigint` in schema and Go `int64` | `migrations/001_init.sql`, Go models | **PASS** | Zero floating-point types used for monetary values |
-| **Context Propagation** | `r.Context()` passed to database and HTTP requests | `cmd/api/main.go`, `cmd/worker/main.go` | **PASS** | Timeouts and cancellations propagate cleanly |
+| **Context Propagation** | API: `r.Context()` with a 30 s timeout on the receipt transaction. Worker: claim uses the signal context; each push uses `context.Background()` + 2 s timeout, so shutdown abandons rather than cancels in-flight pushes | `cmd/api/main.go`, `cmd/worker/main.go` | **PASS (with caveat)** | Safe because lease expiry + 409 reconciliation recover abandoned pushes |
 
 ---
 
